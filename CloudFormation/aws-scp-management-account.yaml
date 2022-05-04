@@ -1,0 +1,334 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: The template to deploy the SCP in the Master account to protect the Central backup vault. 
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - 
+        Label:
+          default: Lambda configuration parameters 
+        Parameters: 
+          - pLambdaFunctionName
+          - pLambdaIAMRoleName
+      
+      - 
+        Label: 
+          default: Service Control Policy parameters
+        Parameters:
+          - pServiceControlPolicyName
+          - pCentralBackupVaultAdmin
+          - pCloudFormationRole
+          - pCentralBackupVaultArn
+          - pTargetType
+          - pTargetId
+
+Parameters:
+  pLambdaFunctionName: 
+    Description: The Friendly name for Lambda function. 
+    Type: String
+    Default: ServiceControlPolicyLambda 
+  pLambdaIAMRoleName: 
+    Description: IAM role for the Lambda function. 
+    Type: String
+    Default: ServiceControlPolicyLambdaRole 
+  pServiceControlPolicyName:
+    Description: The Service control Policy Name. 
+    Type: String 
+    Default: CentralBackupServiceControlPolicy
+  pCentralBackupVaultArn:
+    Description: The arn of the Central backup vault. 
+    Type: String 
+  pCentralBackupVaultAdmin:
+    Description: The arn of the admin for the Central backup vault. 
+    Type: String
+  pCloudFormationRole:
+    Description: The arn of the cloudformation StackSet execution role. 
+    Type: String
+  pTargetType: 
+    Description: The TargetType to attach the Service Control Policy
+    Type: String
+    AllowedValues:
+      - Account_Id
+      - Organization_Unit
+  pTargetId:
+    Description: The Target to which Service Control Policy to be attched . This could be either Account ID or Organizational Unit. 
+    Type: String
+
+Resources: 
+  rCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      Description: The custom Resource to call the Service control policy Lambda.
+      PolicyName: !Ref pServiceControlPolicyName
+      PolicyDescription: The SCP that restricts mutative action to Central backup vault to all the Users except the Cybervault admin. 
+      PolicyContents: !Sub >-
+        {
+          "Version": "2012-10-17",
+          "Statement": {
+            "Sid": "ProtectBackupVaultOperations",
+            "Effect": "Deny",
+            "Action": [
+              "backup:PutBackupVaultAccessPolicy",
+              "backup:DeleteVaultAccessPolicy",
+              "backup:DeleteBackupVault",
+              "backup:PutBackupVaultLockConfiguration"
+            ],
+            "Resource": "${pCentralBackupVaultArn}",
+            "Condition": {
+              "StringNotLike": {
+                "aws:PrincipalArn": [
+                  "${pCentralBackupVaultAdmin}",
+                  "${pCloudFormationRole}"
+                ]
+              }
+            }
+          }
+        }
+      TargetSelection: !Ref pTargetType
+      TargetId: !Ref pTargetId
+      ServiceToken: !GetAtt rServiceControlPolicyLambda.Arn
+  rServiceControlPolicyLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: The Lambda function to Create the Service control policy and attch to the lambda.
+      FunctionName: !Ref pLambdaFunctionName
+      Code: 
+        ZipFile: |-
+          #!/usr/bin/env python
+          import json
+          from json import dumps
+          import http
+          import boto3
+          import logging
+          import urllib3
+
+          #Logging configuration
+          logging.basicConfig(level = logging.INFO)
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          #Initialization
+          service_control_policy_client = boto3.client('organizations')
+          http = urllib3.PoolManager()
+
+          #Custom resource response function
+          def send_response(event, context, response):
+              '''Send a response to CloudFormation to handle the custom resource lifecycle.'''
+
+              responseBody = { 
+                  'Status': response,
+                  'Reason': 'See details in CloudWatch Log Stream: ' + \
+                      context.log_stream_name,
+                  'PhysicalResourceId': context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+              }
+
+              print('RESPONSE BODY: \n' + dumps(responseBody))
+
+              responseUrl = event['ResponseURL']
+              json_responseBody = json.dumps(responseBody)
+              headers = {
+                  'content-type' : '',
+                  'content-length' : str(len(json_responseBody))
+              }
+              try:
+                  response = http.request('PUT', responseUrl, headers=headers, body=json_responseBody)
+                  #response = response.send(responseUrl, data=json_responseBody, headers=headers)
+                  print ("Status code: " +response.reason)
+
+              except Exception as e:
+                  print ("send(..) failed executing requests.put(..): " + str(e))
+
+              return True
+
+          #The function to attach SCP to the target.
+          def attach_scp(target_type, target_resource, policy_name):
+              try:
+                  get_scp_list = service_control_policy_client.list_policies(Filter='SERVICE_CONTROL_POLICY')
+              
+                  for i in get_scp_list['Policies']:
+                      if i['Name'] == policy_name:
+                          get_scp_id = i['Id']
+                      else: 
+                          logger.info("The policy is not created.")
+                  if target_type == "Organization_Unit": 
+                      get_targetId = service_control_policy_client.describe_organizational_unit(OrganizationalUnitId=target_resource)['OrganizationalUnit']['Id']
+                  elif target_type == "Account_Id":
+                      get_targetId = service_control_policy_client.describe_account(AccountId=target_resource)['Account']['Id']
+                  else: 
+                      logger.info("Enter the correct Target type")
+                      
+                  scp_attach = service_control_policy_client.attach_policy(PolicyId = get_scp_id,TargetId = get_targetId)
+                  logger.info(f"The Created Service control policy was attached to the target {target_resource}")
+                  return True
+
+              except Exception as e:
+                  logger.info(f"The Created Service control policy failed to the target {target_resource} because of {e}")
+                  return False
+
+          #The function to update the target if required during during update stack.
+          def update_target(target_type, target_resource, get_scp_id):
+              try:
+                  get_current_target = service_control_policy_client.list_targets_for_policy(PolicyId=get_scp_id)
+                  for i in get_current_target['Targets']:
+                      existing_target_id = i['TargetId']
+                  if target_type == "Organization_Unit": 
+                      get_targetId = service_control_policy_client.describe_organizational_unit(OrganizationalUnitId=target_resource)['OrganizationalUnit']['Id']
+                      if get_targetId == existing_target_id:
+                          return True
+                      else:
+                          logger.info(f"Detaching the Target Organization Unit {existing_target_id} from the policy.")
+                          detach_scp = service_control_policy_client.detach_policy(PolicyId= get_scp_id, TargetId = existing_target_id)
+                          logger.info(f"Attaching the policy to the Target Organization Unit {get_targetId}.")
+                          scp_attach = service_control_policy_client.attach_policy(PolicyId = get_scp_id,TargetId = get_targetId)
+                          return True
+
+                  if target_type == "Account_Id":
+                      get_targetId = service_control_policy_client.describe_account(AccountId=target_resource)['Account']['Id']
+                      if get_targetId == existing_target_id:
+                          return True
+                      else:
+                          logger.info(f"Detaching the Target account {existing_target_id} from the policy.")
+                          detach_scp = service_control_policy_client.detach_policy(PolicyId= get_scp_id, TargetId = existing_target_id)
+                          logger.info(f"Attaching the policy to the Target account {get_targetId}.")
+                          scp_attach = service_control_policy_client.attach_policy(PolicyId = get_scp_id,TargetId = get_targetId)
+                          return True
+                  else: 
+                      logger.info("Enter the correct Target type")
+                      return False
+              except Exception as e:
+                  logger.info(f"The Service control policy was updated but failed to attach to the target{target_resource} because of {e}")
+                  return False 
+
+          #The function to detach and delete SCP when delete stack is called.
+          def delete_scp(policy_name, target_type, target_resource):
+              try:
+                  if target_type == "Organization_Unit": 
+                          get_targetId = service_control_policy_client.describe_organizational_unit(OrganizationalUnitId=target_resource)['OrganizationalUnit']['Id']
+                  elif target_type == "Account_Id":
+                      get_targetId = service_control_policy_client.describe_account(AccountId=target_resource)['Account']['Id']
+                  else: 
+                      logger.info("Enter the correct Target type")
+                  get_scp_list = service_control_policy_client.list_policies(Filter='SERVICE_CONTROL_POLICY')
+                  
+                  for i in get_scp_list['Policies']:
+                      if i['Name'] == policy_name:
+                          get_scp_id = i['Id']
+                  logger.info("Detaching the Target from the policy.")
+                  detach_scp = service_control_policy_client.detach_policy(PolicyId= get_scp_id, TargetId = get_targetId)
+                  logger.info("DeletingService control policy")
+                  delete_scp = service_control_policy_client.delete_policy(PolicyId = get_scp_id)
+                  return True
+
+              except Exception as e:
+                  logger.info(f"The Created Service control policy failed to the target {target_resource} because of {e}")
+                  return False
+
+          #The main Lambda function. 
+          def lambda_handler(event, context):
+              logger.info(event)
+              policy_name = event['ResourceProperties']['PolicyName']
+              policy_contents = event['ResourceProperties']['PolicyContents']
+              policy_description = event['ResourceProperties']['PolicyDescription']
+              target_type = event['ResourceProperties']['TargetSelection']
+              target_resource = event['ResourceProperties']['TargetId']
+
+              if event['RequestType'] == 'Create':
+                  try:
+                      logger.info("Creating Service control policy")
+                      create_scp = service_control_policy_client.create_policy(Content = policy_contents, Description = policy_description, Name = policy_name, Type='SERVICE_CONTROL_POLICY')
+                      logger.info("The Service control policy created successfully")
+                      Attach_scp = attach_scp(target_type, target_resource, policy_name)
+                      if Attach_scp: 
+                          response = 'SUCCESS'
+                      else:
+                          response = 'FAILED'
+                  except Exception as e:
+                      logger.info(f"Creating Service control policy failed because of {e}")
+                      response = 'FAILED'
+                  send_response(event, context, response)
+              
+              if event['RequestType'] == 'Update': 
+                  try:
+                      get_scp_list = service_control_policy_client.list_policies(Filter='SERVICE_CONTROL_POLICY')
+                      for i in get_scp_list['Policies']:
+                          if i['Name'] == policy_name:
+                              get_scp_id = i['Id']
+                      logger.info("Updating Service control policy")
+                      update_scp = service_control_policy_client.update_policy(PolicyId = get_scp_id, Content = policy_contents, Description = policy_description, Name = policy_name)
+                      target_scp = update_target(target_type, target_resource, get_scp_id)
+                      if target_scp:
+                          response = 'SUCCESS'
+                      else:
+                          response = 'FAILED'
+                  except Exception as e:
+                      logger.info(f"Updating Service control policy failed because of {e}")
+                      response = 'FAILED'
+                  send_response(event, context, response)
+              
+              if event['RequestType'] == 'Delete':
+                  try: 
+                      Delete_scp = delete_scp(policy_name, target_type, target_resource)
+                      if Delete_scp: 
+                          response = 'SUCCESS'
+                      else:
+                          response = 'FAILED'
+                  except Exception as e:
+                      logger.info(f"Deletion of Service control policy failed because of {e}")
+                      response = 'FAILED'
+                  send_response(event, context, response)
+
+
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt rServiceControlPolicyLambdaRole.Arn
+      Runtime: python3.8 
+      Timeout: 180
+  rServiceControlPolicyLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref pLambdaIAMRoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: Cloudwatch-Lambda-Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - arn:aws:logs:*:*:*
+  rServiceControlPolicyLambdaPolicy: 
+    Type: AWS::IAM::Policy
+    Properties:
+      Roles:
+        - !Ref rServiceControlPolicyLambdaRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - organizations:CreatePolicy 
+              - organizations:UpdatePolicy
+              - organizations:AttachPolicy
+              - organizations:DetachPolicy
+              - organizations:DeletePolicy
+              - organizations:DescribeOrganizationalUnit
+              - organizations:DescribeAccount
+              - organizations:ListPolicies
+              - organizations:ListTargetsForPolicy
+            Resource: '*'
+      PolicyName: PolicyToCreateSCP
+

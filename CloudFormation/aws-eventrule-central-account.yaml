@@ -1,0 +1,134 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This template creates sns topic and event bridge rule to send notification when Restricted actions performed in Central backup account. 
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label: 
+          default: SNS configuration 
+        Parameters:
+          - ptopicName
+          - pSubscriptionEmail
+      - 
+        Label: 
+          default: Event Rule configuration
+        Parameters:
+          - pEventRuleName
+          - pBackupVaultAdmin
+          - pBackupVaultName
+Parameters:
+  ptopicName:
+    Description: The SNS topic name. 
+    Type: String
+  pSubscriptionEmail:
+    Description: The Subscription email for receiving notification form the sns topic
+    Type: String
+  pEventRuleName:
+    Description: The Event Rule name.
+    Type: String
+  pBackupVaultAdmin:
+    Description: The Arn of admin role for the Central backup vault. 
+    Type: CommaDelimitedList
+  pBackupVaultName:
+    Description: The Central backup vault name. 
+    Type: String
+    AllowedPattern: ^[a-zA-Z0-9\-\_\.]{1,50}$
+Resources:
+  rsnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription: 
+        - Endpoint: !Ref pSubscriptionEmail
+          Protocol: Email
+      TopicName: !Ref ptopicName
+  rsnsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument: !Sub >-
+        {
+          "Version": "2008-10-17",
+          "Statement": [
+            {
+              "Sid": "DefaultStatementID",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": "*"
+              },
+              "Action": [
+                "SNS:GetTopicAttributes",
+                "SNS:SetTopicAttributes",
+                "SNS:AddPermission",
+                "SNS:RemovePermission",
+                "SNS:DeleteTopic",
+                "SNS:Subscribe",
+                "SNS:ListSubscriptionsByTopic",
+                "SNS:Publish"
+              ],
+              "Resource": "${rsnsTopic}",
+              "Condition": {
+                "StringEquals": {
+                  "AWS:SourceOwner": "${AWS::AccountId}"
+                }
+              }
+            },
+            {
+              "Sid": "Allow_Publish_Events",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "events.amazonaws.com"
+              },
+              "Action": "sns:Publish",
+              "Resource": "${rsnsTopic}"
+            }
+          ]
+        }
+      Topics:
+        - !Ref rsnsTopic
+  reventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: The Event Rule to notify when the Restricted actions are performed on the Central backup vault. 
+      Name: !Ref pEventRuleName
+      EventPattern:
+        {
+          "source": ["aws.backup"],
+          "detail-type": ["AWS API Call via CloudTrail"],
+          "detail": {
+              "eventSource": ["backup.amazonaws.com"],
+              "eventName": ["PutBackupVaultAccessPolicy", "DeleteBackupVaultAccessPolicy", "DeleteBackupVault", "PutBackupVaultLockConfiguration", "DeleteBackupVaultLockConfiguration"],
+              "errorCode": [{
+                "exists": false
+              }],
+          "requestParameters": {
+            "backupVaultName": [!Ref pBackupVaultName]
+          },
+          "userIdentity": {
+          "type": ["IAMUser", "AssumedRole"],
+          "sessionContext": {
+          "sessionIssuer": {
+            "arn": [{
+              "anything-but": !Ref pBackupVaultAdmin
+            }
+            ]
+          }}}
+        }}        
+      State:  ENABLED
+      Targets: 
+        - Arn: !Ref rsnsTopic
+          Id: 'SNS-target'
+          InputTransformer:
+            InputPathsMap:
+              "Action": "$.detail.eventName"
+              "User": "$.detail.userIdentity.arn"
+              "Vault": "$.detail.requestParameters.backupVaultName"
+            InputTemplate: |
+              "The user with arn <User> performed action <Action> on Central Backup Vault <Vault>"
+
+Outputs:
+  EventRule:
+    Description: The arn of event rule that is created. 
+    Value: !GetAtt reventRule.Arn
+  SnsTopic:
+    Description: The arn of the SNS topic that is created. 
+    Value: !Ref rsnsTopic
+    

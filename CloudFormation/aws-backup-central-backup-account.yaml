@@ -1,0 +1,134 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This template creates the central backup KMS key , AWS Backup vault , enables WORM model and protects the vault from unauthorized access. 
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label: 
+          default: AWS Backup Configuration
+        Parameters:
+          - pBackupKeyAlias
+          - pCentralBackupVaultName
+          - pOrganizationId
+      - 
+        Label: 
+          default: AWS Backup Vault Configuration
+        Parameters:
+          - pBackupVaultAdmin
+          - pMinRetentionDays
+          - pMaxRetentionDays
+          - pChangeableForDays
+Parameters:
+  pBackupKeyAlias:
+    Description: The KMS key alias that will be used to name the Customer managed KMS key. The alias should be in format alias/<friendlyname>
+    Type: String
+  pCentralBackupVaultName: 
+    Description: The Central backup vault name. 
+    Type: String
+    AllowedPattern: ^[a-zA-Z0-9\-\_\.]{1,50}$
+  pOrganizationId:
+    Description: The Organization ID.
+    Type: String 
+  pBackupVaultAdmin: 
+    Description: The Arn of admin role for the Central backup vault. 
+    Type: CommaDelimitedList
+  pMinRetentionDays:
+    Description: The minimum Retention days to be configured for the Recovery points stored in Central backup vault. 
+    Type: Number
+  pMaxRetentionDays:
+    Description: The maximum Retention days to be configured for the Recovery points stored in Central backup vault. 
+    Type: Number
+  pChangeableForDays: 
+    Description: The number of days during which the vault lock configuraion can be modified before permanently locked. 
+    Type: Number
+    Default: 3
+
+Resources:
+  rCentralKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Ref pBackupKeyAlias
+      TargetKeyId: !GetAtt rCentralAccountBackupKey.KeyId
+  rCentralAccountBackupKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "Backup Key"
+      EnableKeyRotation: True
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: "Enable IAM User Permissions"
+            Effect: "Allow"
+            Principal:
+              AWS:
+                - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          
+          -
+            Sid: "Allow alias creation during setup"
+            Effect: "Allow"
+            Principal:
+              AWS: "*"
+            Action: "kms:CreateAlias"
+            Resource: "*"
+            Condition:
+              StringEquals:
+                "kms:CallerAccount": !Sub ${AWS::AccountId}
+                "kms:ViaService": !Sub "cloudformation.${AWS::Region}.amazonaws.com"
+          -
+            Sid: Allow use of the key by authorized Backup principal
+            Effect: "Allow"
+            Principal:
+              AWS: "arn:aws:iam::${AWS::AccountId}:role/service-role/AWSBackupDefaultServiceRole"
+            Action:
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+            Resource: "*"
+            Condition:
+              StringEquals:
+                "kms:ViaService": "backup.amazonaws.com"
+  rCentralBackupVault:
+    Type: AWS::Backup::BackupVault
+    Properties:
+      AccessPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Allow access to backup vault"
+            Effect: Allow
+            Action: backup:CopyIntoBackupVault
+            Resource: "*"
+            Principal: "*"
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref pOrganizationId
+          - Sid: "Deny access to Copy and restore for all roles except Backup Vault Admins"
+            Effect: Deny
+            Action: 
+              - backup:StartCopyJob
+              - backup:StartRestoreJob
+              - backup:PutBackupVaultLockConfiguration
+              - backup:DeleteBackupVaultLockConfiguration
+              - backup:PutBackupVaultAccessPolicy
+            Resource: "*"
+            Principal: "*"
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn: !Ref pBackupVaultAdmin
+      BackupVaultName: !Ref pCentralBackupVaultName
+      EncryptionKeyArn: !GetAtt rCentralAccountBackupKey.Arn
+      LockConfiguration:
+        ChangeableForDays: !Ref pChangeableForDays
+        MaxRetentionDays: !Ref pMaxRetentionDays
+        MinRetentionDays: !Ref pMinRetentionDays
+Outputs:
+  BackupVaultArn:
+    Description: The Arn of the backup vault
+    Value: !GetAtt rCentralBackupVault.BackupVaultArn
+
+      
