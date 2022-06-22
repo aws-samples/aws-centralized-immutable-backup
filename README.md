@@ -1,10 +1,10 @@
-# How to Implement a Virtual Air Gap Solution with AWS Backup
+# How to implement a centralized immutable backup solution with AWS Backup
 
-This solution demonstrates how you can utilize the AWS CloudFormation automate to build the Virtual Air Gap solution with AWS Backup. Using this solution you can achieve Write Once Read Many (WORM) for your data backup stored in AWS Backup and also protect data backup from Unauthorized access other than the admin of the Central backup account vault. 
+This solution demonstrates how you can utilize the AWS CloudFormation automate to build a centralized immutable backup solution with AWS Backup. Using this solution you can achieve Write Once Read Many (WORM) for your data backup stored in AWS Backup and also protect data backup from unauthorized access other than the admin of the Central backup account vault. 
 
 ## Solution architecture and design
 
-## ![](./images/aws-virtual-airgap-solution.jpg)
+## ![](./images/aws-immutable-backup-solution.jpg)
 
 The workflow and architecture of the solution works as follows:
 
