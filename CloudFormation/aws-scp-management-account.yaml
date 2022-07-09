@@ -93,7 +93,6 @@ Resources:
       FunctionName: !Ref pLambdaFunctionName
       Code: 
         ZipFile: |-
-          #!/usr/bin/env python
           import json
           from json import dumps
           import http
