@@ -81,7 +81,7 @@ Resources:
             Sid: Allow use of the key by authorized Backup principal
             Effect: "Allow"
             Principal:
-              AWS: "arn:aws:iam::${AWS::AccountId}:role/service-role/AWSBackupDefaultServiceRole"
+              AWS: "*"
             Action:
               - kms:DescribeKey
               - kms:Encrypt
@@ -93,6 +93,7 @@ Resources:
             Condition:
               StringEquals:
                 "kms:ViaService": "backup.amazonaws.com"
+                "aws:PrincipalArn": !Sub "arn:aws:iam::${AWS::AccountId}:role/service-role/AWSBackupDefaultServiceRole"
   rCentralBackupVault:
     Type: AWS::Backup::BackupVault
     Properties:
